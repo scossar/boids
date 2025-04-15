@@ -7,6 +7,7 @@
 * notes:
 * - tracking_boid_phases.md
 * - boid_window.md
+* - boid_cycle_position.md
 *
 */
 
@@ -137,6 +138,7 @@ static t_int *boids2_perform(t_int *w)
 
   t_float prev_cycle_pos = x->x_cycle_pos;
   t_float new_cycle_pos = prev_cycle_pos + x->x_ms_per_block;
+  // rounding errors are fixed once per cycle; this may be good enough
   if (new_cycle_pos >= x->x_cycle_ms) new_cycle_pos = 0.0f;
   x->x_cycle_pos = new_cycle_pos;
   t_float next_cycle_pos = new_cycle_pos + x->x_ms_per_block;
@@ -147,8 +149,6 @@ static t_int *boids2_perform(t_int *w)
         boid->cycle_start_pos > prev_cycle_pos &&
         boid->cycle_start_pos < next_cycle_pos) {
       boid->active = 1;
-      // pseudo code:
-      // position->boids_count++
     }
   }
 
@@ -231,7 +231,7 @@ static void boids_init(t_boids2 *x)
   for (int i = 0; i < x->x_num_boids; i++) {
     // initialize with random ratios between 0.5 and 2.0
     x->boids[i].ratio = 0.5f + 1.5f * ((float)rand() / RAND_MAX);
-    x->boids[i].grain_duration_ms = (t_float)250.0; // hardcode for now
+    x->boids[i].grain_duration_ms = (t_float)1000.0; // hardcode for now
     x->boids[i].window_phase = (double)0.0;
     x->boids[i].wavetable_phase = (double)0.0;
     // initialize, then call update function from dsp method
