@@ -11,7 +11,8 @@ static float *cos_table = NULL; // shared wavetable
 static int table_reference_count = 0; // track how many instances exist
 
 typedef struct _boid {
-  t_float ratio;
+  t_float ratio; // sets the ratio of a boid's frequency from the master
+  // frequency.
   double phase;
 } t_boid;
 
@@ -21,7 +22,6 @@ typedef struct _boids1 {
   int x_num_boids;
   t_boid *boids;
 
-  // double x_phase;
   t_float x_conv;
   t_inlet *x_freq_inlet;
   t_outlet *x_outlet;
@@ -58,16 +58,14 @@ static void wavetable_free(void)
 static t_int *boids1_perform(t_int *w)
 {
   t_boids1 *x = (t_boids1 *)(w[1]);
-  t_sample *in1 = (t_sample *)(w[2]); // fix the type
-  t_sample *out = (t_sample *)(w[3]); // fix the type
+  t_sample *in1 = (t_sample *)(w[2]);
+  t_sample *out = (t_sample *)(w[3]);
   int n = (int)(w[4]);
 
   float *tab = cos_table;
   t_float conv = x->x_conv;
-  double phase_0 = x->boids[0].phase;
-  double phase_1 = x->boids[1].phase;
-  double phase_2 = x->boids[2].phase;
-  double phase_3 = x->boids[3].phase;
+  int mask = WAVETABLE_SIZE - 1;
+  t_float amp_scale = 1.0f / x->x_num_boids; // tmp solution
 
   if (!tab) return (w+5);
 
@@ -75,60 +73,29 @@ static t_int *boids1_perform(t_int *w)
     t_sample root_f = *in1++;
     t_sample output = (t_sample)0.0;
 
-    phase_0 += root_f * conv;
-    double curphase_0 = phase_0;
-    unsigned int idx_0 = (unsigned int)curphase_0;
-    t_sample frac_0 = (t_sample)(curphase_0 - idx_0);
-    idx_0 &= (WAVETABLE_SIZE - 1);
-    t_sample f1_0 = tab[idx_0];
-    t_sample f2_0 = tab[(idx_0 + 1) & (WAVETABLE_SIZE - 1)];
-    output += f1_0 + frac_0 * (f2_0 - f1_0);
+    for (int i = 0; i < x->x_num_boids; i++) {
+      t_boid boid = x->boids[i];
+      double curphase = boid.phase;
+      unsigned int idx = (unsigned int)curphase;
+      t_sample frac = (t_sample)(curphase - idx);
+      idx &= mask; // keep the index within the wavetable
+      t_sample f1 = tab[idx];
+      t_sample f2 = tab[(idx + 1) & mask]; // in case idx + 1 is out of the
+      // wavetable
+      output += f1 + frac * (f2 - f1); // add a boid amplitude attribute
+      curphase += boid.ratio * root_f * conv;
+      x->boids[i].phase = curphase; // can't use the bit mask on float values
+    }
 
-    phase_1 += root_f * x->boids[1].ratio * conv;
-    double curphase_1 = phase_1;
-    unsigned int idx_1 = (unsigned int)curphase_1;
-    t_sample frac_1 = (t_sample)(curphase_1 - idx_1);
-    idx_1 &= (WAVETABLE_SIZE - 1);
-    t_sample f1_1 = tab[idx_1];
-    t_sample f2_1 = tab[(idx_1 + 1) & (WAVETABLE_SIZE - 1)];
-    output += f1_1 + frac_1 * (f2_1 - f1_1);
-
-    phase_2 += root_f * x->boids[2].ratio * conv;
-    double curphase_2 = phase_2;
-    unsigned int idx_2 = (unsigned int)curphase_2;
-    t_sample frac_2 = (t_sample)(curphase_2 - idx_2);
-    idx_2 &= (WAVETABLE_SIZE - 1);
-    t_sample f1_2 = tab[idx_2];
-    t_sample f2_2 = tab[(idx_2 + 1) & (WAVETABLE_SIZE - 1)];
-    output += f1_2 + frac_2 * (f2_2 - f1_2);
-
-    phase_3 += root_f * x->boids[3].ratio * conv;
-    double curphase_3 = phase_3;
-    unsigned int idx_3 = (unsigned int)curphase_3;
-    t_sample frac_3 = (t_sample)(curphase_3 - idx_3);
-    idx_3 &= (WAVETABLE_SIZE - 1);
-    t_sample f1_3 = tab[idx_3];
-    t_sample f2_3 = tab[(idx_3 + 1) & (WAVETABLE_SIZE - 1)];
-    output += f1_3 + frac_3 * (f2_3 - f1_3);
-
-    *out++ = output * 0.25f;
+    *out++ = output * amp_scale;
   }
 
-  while (phase_0 >= WAVETABLE_SIZE) phase_0 -= WAVETABLE_SIZE;
-  while (phase_0 < 0) phase_0 += WAVETABLE_SIZE;
-  x->boids[0].phase = phase_0;
-
-  while (phase_1 >= WAVETABLE_SIZE) phase_1 -= WAVETABLE_SIZE;
-  while (phase_1 < 0) phase_1 += WAVETABLE_SIZE;
-  x->boids[1].phase = phase_1;
-
-  while (phase_2 >= WAVETABLE_SIZE) phase_2 -= WAVETABLE_SIZE;
-  while (phase_2 < 0) phase_2 += WAVETABLE_SIZE;
-  x->boids[2].phase = phase_2;
-
-  while (phase_3 >= WAVETABLE_SIZE) phase_3 -= WAVETABLE_SIZE;
-  while (phase_3 < 0) phase_3 += WAVETABLE_SIZE;
-  x->boids[3].phase = phase_3;
+  for (int i = 0; i < x->x_num_boids; i++) {
+    double phase = x->boids[i].phase;
+    while (phase >= WAVETABLE_SIZE) phase -= WAVETABLE_SIZE;
+    while (phase < 0) phase += WAVETABLE_SIZE;
+    x->boids[i].phase = phase;
+  }
 
   return (w + 5);
 }
@@ -145,7 +112,6 @@ static void boids_init(t_boids1 *x)
 {
   x->boids = (t_boid *)getbytes(sizeof(t_boid) * x->x_num_boids);
   if (x->boids == NULL) {
-    // TODO: handle this better
     pd_error(x, "boids1~: failed to allocate memory to boids");
   }
 
@@ -153,7 +119,7 @@ static void boids_init(t_boids1 *x)
   
   t_float r = 1.123f;
   for (int i = 0; i < x->x_num_boids; i++) {
-    x->boids[i].ratio = r * i;
+    x->boids[i].ratio = r * (i + 1);
     x->boids[i].phase = (double)0.0;
     post("initialized boid[%d] with ratio %f", i, x->boids[i].ratio);
   }
@@ -163,10 +129,8 @@ static void *boids1_new(t_floatarg root_freq, t_floatarg num_boids)
 {
   t_boids1 *x = (t_boids1 *)pd_new(boids1_class);
 
-  // x->x_phase = (double)0.0;
   x->x_f = root_freq > 0 ? (t_float)root_freq : (t_float)220.0;
-  // x->x_num_boids = num_boids > 0 ? (int)num_boids : 4;
-  x->x_num_boids = 4;
+  x->x_num_boids = num_boids > 0 ? (int)num_boids : 4;
 
   x->x_freq_inlet = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_signal, &s_signal);
   pd_float((t_pd *)x->x_freq_inlet, x->x_f);
@@ -199,7 +163,7 @@ void boids1_tilde_setup(void)
                                (t_method)boids1_free,
                                sizeof(t_boids1),
                                CLASS_DEFAULT,
-                               A_DEFFLOAT, 0);
+                               A_DEFFLOAT, A_DEFFLOAT, 0);
 
   class_addmethod(boids1_class, (t_method)boids1_dsp, gensym("dsp"), A_CANT, 0);
   CLASS_MAINSIGNALIN(boids1_class, t_boids1, x_f);
