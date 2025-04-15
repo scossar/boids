@@ -31,14 +31,17 @@ typedef struct _boids1 {
 static void wavetable_init(void)
 {
   if (cos_table == NULL) {
-    cos_table = (float *)getbytes(sizeof(float) * (WAVETABLE_SIZE ));
+    // adding an extra sample for 2 point interpolation
+    cos_table = (float *)getbytes(sizeof(float) * (WAVETABLE_SIZE +1));
     if (cos_table) {
-      for (int i = 0; i < WAVETABLE_SIZE; i++) {
+      // <= accounts for the extra sample here
+      for (int i = 0; i <= WAVETABLE_SIZE; i++) {
         cos_table[i] = cosf((i * 2.0f * (float)M_PI) / (float)WAVETABLE_SIZE);
       }
-      post("boids1~: initialized cosine table of size %d", WAVETABLE_SIZE);
+      post("boids1~: initialized cosine table of size %d (plus 1 sample)", WAVETABLE_SIZE);
     } else {
       post("boids1~ error: failed to allocate memory for cosine table");
+      return;
     }
   }
   table_reference_count++;
@@ -48,7 +51,8 @@ static void wavetable_free(void)
 {
   table_reference_count--;
   if (table_reference_count <= 0 && cos_table != NULL) {
-    freebytes(cos_table, sizeof(float) * (WAVETABLE_SIZE));
+    // NOTE: extra sample used for interpolation
+    freebytes(cos_table, sizeof(float) * (WAVETABLE_SIZE + 1));
     cos_table = NULL;
     post("boids1~: freed cosine table");
     table_reference_count = 0; // just to be safe
@@ -74,27 +78,25 @@ static t_int *boids1_perform(t_int *w)
     t_sample output = (t_sample)0.0;
 
     for (int i = 0; i < x->x_num_boids; i++) {
-      t_boid boid = x->boids[i];
-      double curphase = boid.phase;
-      unsigned int idx = (unsigned int)curphase;
+      t_boid *boid = &x->boids[i]; // use a pointer to avoid copying
+      double curphase = boid->phase;
+
+      unsigned int idx = (unsigned int)curphase & mask;
       t_sample frac = (t_sample)(curphase - idx);
-      idx &= mask; // keep the index within the wavetable
       t_sample f1 = tab[idx];
-      t_sample f2 = tab[(idx + 1) & mask]; // in case idx + 1 is out of the
-      // wavetable
+      t_sample f2 = tab[idx + 1];
       output += f1 + frac * (f2 - f1); // add a boid amplitude attribute
-      curphase += boid.ratio * root_f * conv;
-      x->boids[i].phase = curphase; // can't use the bit mask on float values
+
+      curphase += boid->ratio * root_f * conv;
+
+      // this isn't strictly required. it should improve precision in
+      // long runs by preventing the phase from getting huge
+      while (curphase >= WAVETABLE_SIZE) curphase -= WAVETABLE_SIZE;
+
+      boid->phase = curphase;
     }
 
     *out++ = output * amp_scale;
-  }
-
-  for (int i = 0; i < x->x_num_boids; i++) {
-    double phase = x->boids[i].phase;
-    while (phase >= WAVETABLE_SIZE) phase -= WAVETABLE_SIZE;
-    while (phase < 0) phase += WAVETABLE_SIZE;
-    x->boids[i].phase = phase;
   }
 
   return (w + 5);
@@ -113,13 +115,12 @@ static void boids_init(t_boids1 *x)
   x->boids = (t_boid *)getbytes(sizeof(t_boid) * x->x_num_boids);
   if (x->boids == NULL) {
     pd_error(x, "boids1~: failed to allocate memory to boids");
+    return;
   }
 
-  // srand(time(NULL)); // do this somewhere else (only call once)
-  
-  t_float r = 1.123f;
   for (int i = 0; i < x->x_num_boids; i++) {
-    x->boids[i].ratio = r * (i + 1);
+    // initialize with random ratios between 0.5 and 2.0
+    x->boids[i].ratio = 0.5f + 1.5f * ((float)rand() / RAND_MAX);
     x->boids[i].phase = (double)0.0;
     post("initialized boid[%d] with ratio %f", i, x->boids[i].ratio);
   }
@@ -138,6 +139,12 @@ static void *boids1_new(t_floatarg root_freq, t_floatarg num_boids)
 
   wavetable_init();
   boids_init(x);
+
+   static int seed_initialized = 0;
+   if (!seed_initialized) {
+     srand((unsigned int)time(NULL));
+     seed_initialized = 1;
+   }
 
   return (void *)x;
 }
