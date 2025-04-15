@@ -20,7 +20,6 @@ static int wavetable_reference_count = 0; // track wave tables
 static float *window_table = NULL;
 static int windowtable_reference_count = 0; // track window tables
 
-
 typedef struct _boid {
   t_float ratio; // sets the ratio of a boid's frequency from the master
   // frequency.
@@ -46,6 +45,7 @@ typedef struct _boids2 {
   t_float x_ms_per_block;
 
   t_float x_conv;
+
   t_inlet *x_freq_inlet;
   t_outlet *x_outlet;
   t_float x_f;
@@ -137,27 +137,18 @@ static t_int *boids2_perform(t_int *w)
 
   t_float prev_cycle_pos = x->x_cycle_pos;
   t_float new_cycle_pos = prev_cycle_pos + x->x_ms_per_block;
-  int cycle_wrapped = (new_cycle_pos >= x->x_cycle_ms) ? 1 : 0;
+  if (new_cycle_pos >= x->x_cycle_ms) new_cycle_pos = 0.0f;
+  x->x_cycle_pos = new_cycle_pos;
+  t_float next_cycle_pos = new_cycle_pos + x->x_ms_per_block;
 
   for (int i = 0; i < x->x_num_boids; i++) {
     t_boid *boid = &x->boids[i];
-    if (!cycle_wrapped) { // within a boundary
-      // activate if a start position has been crossed
-      if (!boid->active &&
-          boid->cycle_start_pos >=prev_cycle_pos &&
-          boid->cycle_start_pos < new_cycle_pos) {
-        boid->active = 1;
-        x->x_num_active_boids++;
-        boid->window_phase = (double)0.0;
-      }
-    } else { // cycle_wrapped
-      if (!boid->active &&
-          boid->cycle_start_pos >= prev_cycle_pos ||
-          boid->cycle_start_pos < new_cycle_pos * x->x_cycle_ms) {
-        boid->active = 1;
-        x->x_num_active_boids++;
-        boid->window_phase = (double)0.0;
-      }
+    if (!boid->active &&
+        boid->cycle_start_pos > prev_cycle_pos &&
+        boid->cycle_start_pos < next_cycle_pos) {
+      boid->active = 1;
+      // pseudo code:
+      // position->boids_count++
     }
   }
 
@@ -208,7 +199,8 @@ static t_int *boids2_perform(t_int *w)
     *out++ = output * 0.5;
   }
 
-  x->x_cycle_pos = cycle_wrapped ? (new_cycle_pos - x->x_cycle_ms) : new_cycle_pos;
+  // x->x_cycle_pos = cycle_wrapped ? (new_cycle_pos - x->x_cycle_ms) : new_cycle_pos;
+  // if (x->x_cycle_pos >= x->x_cycle_ms) x->x_cycle_pos = 0.0f;
   return (w + 5);
 }
 
