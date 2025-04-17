@@ -9,6 +9,7 @@
 * - boid_window.md
 * - boid_cycle_position.md
 * - typecasting_in_c.md  
+* - initializing_boids_and_cycle_divisions.md
 *
 */
 
@@ -22,31 +23,41 @@ static int wavetable_reference_count = 0; // track wave tables
 static t_float *window_table = NULL;
 static int windowtable_reference_count = 0; // track window tables
 
+typedef struct _cycle_division {
+  t_float start_pos_ms; // the division's position in the cycle
+  // pointer to start of array of boid indices that are currently associated with the division
+  int *boid_indices;
+  int num_boids; // number of boids associated with the division
+} t_cycle_division;
+
 typedef struct _boid {
-  t_float ratio; // sets the ratio of a boid's frequency from the master
-  // frequency.
-  double wavetable_phase;
-  t_float grain_duration_ms;
+  // sets the ratio of the boid's frequency to the master (root) frequency
+  t_float ratio;
+  double wavetable_phase; // boid's current position in the wave table
+  t_float window_duration_ms; // ms of the boid's (Hann) window
+  // how much to increment the phase for each DSP step
   t_float window_phase_inc;
-  double window_phase;
-  t_float cycle_start_pos;
-  int active;
+  double window_phase; // boid's current position in the window table
+  // t_float cycle_start_pos;
+  int active; // boolean (1 indicates active)
 } t_boid;
 
 typedef struct _boids3 {
   t_object x_obj;
 
-  t_float x_sr;
+  t_float x_sr; // system sample rate
+  t_float x_ms_per_block; // ms per Pure Data block size
 
-  int x_num_boids;
-  t_boid *boids;
-  int x_num_active_boids;
+  int x_num_boids; // number of boids
+  t_boid *boids; // pointer to start of boids array
 
-  int x_cycle_ms;
-  t_float x_cycle_pos;
-  t_float x_ms_per_block;
+  int x_cycle_ms; // length of cycle in ms
+  int x_num_cycle_divisions; // number of divisions in the cycle
+  t_cycle_division *cycle_divisions; // pointer to start of divisions array
 
-  t_float x_conv;
+  t_float x_cycle_pos_ms; // current possition in the cycle
+
+  t_float x_conv; // frequency convesion for system sample rate
 
   t_inlet *x_freq_inlet;
   t_outlet *x_outlet;
@@ -96,7 +107,7 @@ static void update_boid_parameters(t_boids3 *x)
 {
   for (int i = 0; i < x->x_num_boids; i++) {
     t_boid *boid = &x->boids[i]; // use a pointer to avoid copying
-    t_float window_samples = boid->grain_duration_ms * x->x_sr * (t_float)0.001;
+    t_float window_samples = boid->window_duration_ms * x->x_sr * (t_float)0.001;
     boid->window_phase_inc = (t_float)((t_float)WINDOWTABLE_SIZE / window_samples);
   }
 }
@@ -125,6 +136,29 @@ static void windowtable_free(void)
   }
 }
 
+// add a boid to a division
+static void add_boid_to_division(t_cycle_division *div, int boid_idx) {
+  div->boid_indices[div->num_boids] = boid_idx;
+  div->num_boids++;
+}
+
+static void remove_boid_from_division(t_cycle_division *div, int boid_idx) {
+  // just in case
+  if (div->num_boids <= 0) return;
+
+  // find the boid
+  for (int i = 0; i < div->num_boids; i++) {
+    if (div->boid_indices[i] == boid_idx) {
+      // move last boid to this position, unless it's already the last boid
+      if (i < div->num_boids - 1) {
+        div->boid_indices[i] = div->boid_indices[div->num_boids - 1];
+      }
+      div->num_boids--;
+      return;
+    }
+  }
+}
+
 static t_int *boids3_perform(t_int *w)
 {
   t_boids3 *x = (t_boids3 *)(w[1]);
@@ -138,11 +172,11 @@ static t_int *boids3_perform(t_int *w)
   int wmask = WAVETABLE_SIZE - 1;
   int gmask = WINDOWTABLE_SIZE - 1;
 
-  t_float prev_cycle_pos = x->x_cycle_pos;
+  t_float prev_cycle_pos = x->x_cycle_pos_ms;
   t_float new_cycle_pos = prev_cycle_pos + x->x_ms_per_block;
   // rounding errors are fixed once per cycle; this may be good enough
   if (new_cycle_pos >= x->x_cycle_ms) new_cycle_pos = 0.0f;
-  x->x_cycle_pos = new_cycle_pos;
+  x->x_cycle_pos_ms = new_cycle_pos;
   t_float next_cycle_pos = new_cycle_pos + x->x_ms_per_block;
   int active_count = 0;
 
@@ -152,7 +186,6 @@ static t_int *boids3_perform(t_int *w)
         boid->cycle_start_pos > prev_cycle_pos &&
         boid->cycle_start_pos < next_cycle_pos) {
       boid->active = 1;
-      x->x_num_active_boids++;
     }
     if (boid->active) active_count++;
   }
@@ -223,24 +256,48 @@ static void boids_init(t_boids3 *x)
     return;
   }
 
-  int divisions = 32;
-  t_float division_ms = (t_float)x->x_cycle_ms / (t_float)divisions;
-
-  // efficiency isn't a big deal here, but maybe use a pointer:
-  // t_boid *boid = &x->boids[i];
   for (int i = 0; i < x->x_num_boids; i++) {
-    // initialize with random ratios between 0.5 and 2.0
-    x->boids[i].ratio = (t_float)0.5 + (t_float)1.5 * ((t_float)rand() / RAND_MAX);
-    x->boids[i].grain_duration_ms = (t_float)100.0; // hardcode for now
-    x->boids[i].window_phase = (double)0.0;
-    x->boids[i].wavetable_phase = (double)0.0;
-    // initialize, then call update function from dsp method
-    x->boids[i].window_phase_inc = (t_float)0.0;
+    t_boid *boid = &x->boids[i];
+    boid->ratio = (t_float)0.5 + (t_float)1.5 * ((t_float)rand() / RAND_MAX);
+    boid->window_duration_ms = (t_float)100.0; // hardcoded for now
+    boid->window_phase = (double)0.0;
+    boid->wavetable_phase = (double)0.0;
+    boid->window_phase_inc = (t_float)0.0;
+  }
 
-    int division  = rand() % divisions;
-    x->boids[i].cycle_start_pos = division * division_ms;
-    x->boids[i].active = 0;
-    post("boids3~: (debug) initialized boid[%d] with ratio %f", i, x->boids[i].ratio);
+  for (int i = 0; i < x->x_num_boids; i++) {
+    int division_idx = rand() % x->x_num_cycle_divisions;
+    t_cycle_division *div = &x->cycle_divisions[division_idx];
+    // add the boid's index to the indices array at position num_boids (next
+    // available slot)
+    div->boid_indices[div->num_boids] = i;
+    div->num_boids++;
+  }
+}
+
+// TODO: return int or boolean values to indicate success/failure
+static void cycle_divisions_init(t_boids3 *x)
+{
+  x->cycle_divisions = (t_cycle_division *)getbytes(sizeof(t_cycle_division)
+                                                          * x->x_num_cycle_divisions);
+  if (x->cycle_divisions == NULL) {
+    pd_error(x, "boids3~: failed to allocate memory to cycle_divisions");
+    return;
+  }
+
+  t_float division_ms = (t_float)x->x_cycle_ms / (t_float)x->x_num_cycle_divisions;
+  for (int i = 0; i < x->x_num_cycle_divisions; i++){
+    t_cycle_division *div = &x->cycle_divisions[i];
+    // getbytes calls calloc, so boid_indices are being initialized to 0
+    // since 0 is a valid boid indice, it would probably be better to initialize
+    // to -1
+    div->boid_indices = (int *)getbytes(sizeof(int) * x->x_num_boids);
+    if (div->boid_indices == NULL) {
+      pd_error(x, "boids3~: failed to allocate memory for cycle_division boid_indices");
+      return;
+    }
+    div->num_boids = 0;
+    div->start_pos_ms = division_ms * (t_float)i;
   }
 }
 
@@ -255,14 +312,23 @@ static void *boids3_new(t_floatarg root_freq, t_floatarg num_boids)
   x->x_cycle_ms = 8000;
   x->x_cycle_pos = (t_float)0.0;
   x->x_ms_per_block = (t_float)0.0;
-  x->x_num_active_boids = 0;
+
+  // tmp
+  x->x_num_cycle_divisions = 12;
+
+  // initialize all pointers to NULL so that partial initialization failures can
+  // be handled by the free function
+  x->boids = NULL;
+  x->cycle_divisions = NULL;
 
   x->x_freq_inlet = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_signal, &s_signal);
   pd_float((t_pd *)x->x_freq_inlet, x->x_f);
   x->x_outlet = outlet_new(&x->x_obj, &s_signal);
 
+  // TODO: return ints on success/failure
   wavetable_init();
   windowtable_init();
+  cycle_divisions_init(x);
   boids_init(x);
 
    static int seed_initialized = 0;
@@ -282,6 +348,23 @@ static void boids3_free(t_boids3 *x)
 
   if (x->x_outlet) {
     outlet_free(x->x_outlet);
+  }
+
+  if (x->cycle_divisions != NULL) {
+    for (int i = 0; i < x->x_num_cycle_divisions; i++) {
+      t_cycle_division *div = &x->cycle_divisions[i];
+      if (div->boid_indices != NULL) {
+        freebytes(div->boid_indices, sizeof(int) * x->x_num_boids);
+        div->boid_indices = NULL;
+      }
+    }
+    freebytes(x->cycle_divisions, sizeof(t_cycle_division) * x->x_num_cycle_divisions);
+    x->cycle_divisions = NULL;
+  }
+
+  if (x->boids != NULL) {
+    freebytes(x->boids, sizeof(t_boid) * x->x_num_boids);
+    x->boids = NULL;
   }
 
   // decrease reference counts and possibly free tables
