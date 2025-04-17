@@ -9,6 +9,8 @@
 * - boid_window.md
 * - boid_cycle_position.md
 *
+*   NOTE: there are typecasting issues in this file: see boids3 for improvements
+*
 */
 
 #define WAVETABLE_SIZE 4096 // 2^12 seems good enough
@@ -79,7 +81,7 @@ static void windowtable_init(void)
     window_table = (float *)getbytes(sizeof(float) * (WINDOWTABLE_SIZE + 1));
     if (window_table) {
       for (int i = 0; i <= WINDOWTABLE_SIZE; i++) {
-        window_table[i] = 0.5f * (1.0f - cosf((i * 2.0f * (float)M_PI) / (float)WAVETABLE_SIZE));
+        window_table[i] = 0.5f * (1.0f - cosf((i * 2.0f * (float)M_PI) / (float)WINDOWTABLE_SIZE));
       }
       post("boids2~: initialized window table of size %d (plus 1 sample)", WINDOWTABLE_SIZE);
     } else {

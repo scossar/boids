@@ -8,6 +8,7 @@
 * - tracking_boid_phases.md
 * - boid_window.md
 * - boid_cycle_position.md
+* - typecasting_in_c.md  
 *
 */
 
@@ -16,9 +17,9 @@
 // change it
 
 static t_class *boids3_class = NULL;
-static float *cos_table = NULL; // shared wavetable
+static t_float *cos_table = NULL;
 static int wavetable_reference_count = 0; // track wave tables
-static float *window_table = NULL;
+static t_float *window_table = NULL;
 static int windowtable_reference_count = 0; // track window tables
 
 typedef struct _boid {
@@ -28,14 +29,14 @@ typedef struct _boid {
   t_float grain_duration_ms;
   t_float window_phase_inc;
   double window_phase;
-  int cycle_start_pos;
+  t_float cycle_start_pos;
   int active;
 } t_boid;
 
 typedef struct _boids3 {
   t_object x_obj;
 
-  t_sample x_sr;
+  t_float x_sr;
 
   int x_num_boids;
   t_boid *boids;
@@ -56,11 +57,11 @@ static void wavetable_init(void)
 {
   if (cos_table == NULL) {
     // adding an extra sample for 2 point interpolation
-    cos_table = (float *)getbytes(sizeof(float) * (WAVETABLE_SIZE +1));
+    cos_table = (t_float *)getbytes(sizeof(t_float) * (WAVETABLE_SIZE + 1));
     if (cos_table) {
       // <= accounts for the extra sample here
       for (int i = 0; i <= WAVETABLE_SIZE; i++) {
-        cos_table[i] = cosf((i * 2.0f * (float)M_PI) / (float)WAVETABLE_SIZE);
+        cos_table[i] = (t_float)(cos((i * (t_float)2.0 * (t_float)M_PI) / (t_float)WAVETABLE_SIZE));
       }
       post("boids3~: initialized cosine table of size %d (plus 1 sample)", WAVETABLE_SIZE);
     } else {
@@ -76,10 +77,11 @@ static void windowtable_init(void)
 {
   if (window_table == NULL) {
     // extra sample for 2 point interpolation
-    window_table = (float *)getbytes(sizeof(float) * (WINDOWTABLE_SIZE + 1));
+    window_table = (t_float *)getbytes(sizeof(t_float) * (WINDOWTABLE_SIZE + 1));
     if (window_table) {
       for (int i = 0; i <= WINDOWTABLE_SIZE; i++) {
-        window_table[i] = 0.5f * (1.0f - cosf((i * 2.0f * (float)M_PI) / (float)WAVETABLE_SIZE));
+        window_table[i] = (t_float)(0.5 *
+          (1.0 - cos((i * 2.0 * (t_float)M_PI) / (t_float)WINDOWTABLE_SIZE)));
       }
       post("boids3~: initialized window table of size %d (plus 1 sample)", WINDOWTABLE_SIZE);
     } else {
@@ -94,8 +96,8 @@ static void update_boid_parameters(t_boids3 *x)
 {
   for (int i = 0; i < x->x_num_boids; i++) {
     t_boid *boid = &x->boids[i]; // use a pointer to avoid copying
-    t_float window_samples = boid->grain_duration_ms * x->x_sr * 0.001f;
-    boid->window_phase_inc = (t_float)WINDOWTABLE_SIZE / window_samples;
+    t_float window_samples = boid->grain_duration_ms * x->x_sr * (t_float)0.001;
+    boid->window_phase_inc = (t_float)((t_float)WINDOWTABLE_SIZE / window_samples);
   }
 }
 
@@ -104,7 +106,7 @@ static void wavetable_free(void)
   wavetable_reference_count--;
   if (wavetable_reference_count <= 0 && cos_table != NULL) {
     // NOTE: extra sample used for interpolation
-    freebytes(cos_table, sizeof(float) * (WAVETABLE_SIZE + 1));
+    freebytes(cos_table, sizeof(t_float) * (WAVETABLE_SIZE + 1));
     cos_table = NULL;
     post("boids3~: freed cosine table");
     wavetable_reference_count = 0; // just to be safe
@@ -116,7 +118,7 @@ static void windowtable_free(void)
   windowtable_reference_count--;
   if (windowtable_reference_count <= 0 && window_table != NULL) {
     // NOTE: extra sample used for interpolation
-    freebytes(window_table, sizeof(float) * (WINDOWTABLE_SIZE + 1));
+    freebytes(window_table, sizeof(t_float) * (WINDOWTABLE_SIZE + 1));
     window_table = NULL;
     post("boids3~: freed window table");
     windowtable_reference_count = 0;
@@ -130,8 +132,8 @@ static t_int *boids3_perform(t_int *w)
   t_sample *out = (t_sample *)(w[3]);
   int n = (int)(w[4]);
 
-  float *tab = cos_table;
-  float *gtable = window_table;
+  t_float *tab = cos_table;
+  t_float *gtable = window_table;
   t_float conv = x->x_conv;
   int wmask = WAVETABLE_SIZE - 1;
   int gmask = WINDOWTABLE_SIZE - 1;
@@ -142,6 +144,7 @@ static t_int *boids3_perform(t_int *w)
   if (new_cycle_pos >= x->x_cycle_ms) new_cycle_pos = 0.0f;
   x->x_cycle_pos = new_cycle_pos;
   t_float next_cycle_pos = new_cycle_pos + x->x_ms_per_block;
+  int active_count = 0;
 
   for (int i = 0; i < x->x_num_boids; i++) {
     t_boid *boid = &x->boids[i];
@@ -149,10 +152,12 @@ static t_int *boids3_perform(t_int *w)
         boid->cycle_start_pos > prev_cycle_pos &&
         boid->cycle_start_pos < next_cycle_pos) {
       boid->active = 1;
+      x->x_num_active_boids++;
     }
+    if (boid->active) active_count++;
   }
 
-  t_float amp_scale = (t_float)(1.0f / x->x_num_active_boids); // tmp solution
+  t_float window_amp_scale = (t_float)((t_float)1.0 / (t_float)active_count); // tmp solution
 
   if (!tab) return (w+5);
 
@@ -180,7 +185,7 @@ static t_int *boids3_perform(t_int *w)
         gphase += boid->window_phase_inc;
 
         // todo: add boid amplitude attribute
-        output += (f1 + frac * (f2 - f1)) * gsample;
+        output += (f1 + frac * (f2 - f1)) * gsample * window_amp_scale;
 
         while (wphase >= WAVETABLE_SIZE) wphase -= WAVETABLE_SIZE;
         boid->wavetable_phase = wphase;
@@ -190,26 +195,22 @@ static t_int *boids3_perform(t_int *w)
 
         if (boid->window_phase >= WINDOWTABLE_SIZE - boid->window_phase_inc) {
           boid->active = 0;
-          x->x_num_active_boids--;
         }
       }
     }
 
-    // *out++ = output * amp_scale;
-    *out++ = output * 0.5;
+    *out++ = output;
   }
 
-  // x->x_cycle_pos = cycle_wrapped ? (new_cycle_pos - x->x_cycle_ms) : new_cycle_pos;
-  // if (x->x_cycle_pos >= x->x_cycle_ms) x->x_cycle_pos = 0.0f;
-  return (w + 5);
+  return (w+5);
 }
 
 static void boids3_dsp(t_boids3 *x, t_signal **sp)
 {
   // conversion factor for sample rate
-  x->x_conv = (float)WAVETABLE_SIZE / sp[0]->s_sr;
-  x->x_sr = (t_sample)sp[0]->s_sr;
-  x->x_ms_per_block = (1000.0f / x->x_sr) * sp[0]->s_length;
+  x->x_conv = (t_float)WAVETABLE_SIZE / sp[0]->s_sr;
+  x->x_sr = (t_float)sp[0]->s_sr;
+  x->x_ms_per_block = ((t_float)1000.0 / x->x_sr) * sp[0]->s_length;
   update_boid_parameters(x);
   dsp_add(boids3_perform, 4, x, sp[0]->s_vec, sp[1]->s_vec, sp[0]->s_length);
 }
@@ -222,16 +223,15 @@ static void boids_init(t_boids3 *x)
     return;
   }
 
-  int divisions = 16;
-  // still deciding between int and float here
-  int division_ms = x->x_cycle_ms / divisions;
+  int divisions = 32;
+  t_float division_ms = (t_float)x->x_cycle_ms / (t_float)divisions;
 
   // efficiency isn't a big deal here, but maybe use a pointer:
   // t_boid *boid = &x->boids[i];
   for (int i = 0; i < x->x_num_boids; i++) {
     // initialize with random ratios between 0.5 and 2.0
-    x->boids[i].ratio = 0.5f + 1.5f * ((float)rand() / RAND_MAX);
-    x->boids[i].grain_duration_ms = (t_float)1000.0; // hardcode for now
+    x->boids[i].ratio = (t_float)0.5 + (t_float)1.5 * ((t_float)rand() / RAND_MAX);
+    x->boids[i].grain_duration_ms = (t_float)100.0; // hardcode for now
     x->boids[i].window_phase = (double)0.0;
     x->boids[i].wavetable_phase = (double)0.0;
     // initialize, then call update function from dsp method
@@ -248,11 +248,11 @@ static void *boids3_new(t_floatarg root_freq, t_floatarg num_boids)
 {
   t_boids3 *x = (t_boids3 *)pd_new(boids3_class);
 
-  x->x_f = root_freq > 0 ? (t_float)root_freq : (t_float)220.0;
+  x->x_f = root_freq > 0 ? root_freq : (t_float)220.0;
   x->x_num_boids = num_boids > 0 ? (int)num_boids : 4;
-  x->x_sr = (t_sample)0.0;
+  x->x_sr = (t_float)0.0;
 
-  x->x_cycle_ms = (int)4000;
+  x->x_cycle_ms = 8000;
   x->x_cycle_pos = (t_float)0.0;
   x->x_ms_per_block = (t_float)0.0;
   x->x_num_active_boids = 0;
