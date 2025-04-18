@@ -39,6 +39,7 @@ typedef struct _boid {
   t_float window_phase_inc;
   double window_phase; // boid's current position in the window table
   // t_float cycle_start_pos;
+  t_float window_deactivation_threshold;
   int active; // boolean (1 indicates active)
 } t_boid;
 
@@ -109,6 +110,7 @@ static void update_boid_parameters(t_boids3 *x)
     t_boid *boid = &x->boids[i]; // use a pointer to avoid copying
     t_float window_samples = boid->window_duration_ms * x->x_sr * (t_float)0.001;
     boid->window_phase_inc = (t_float)((t_float)WINDOWTABLE_SIZE / window_samples);
+    boid->window_deactivation_threshold = (t_float)WINDOWTABLE_SIZE - boid->window_phase_inc;
   }
 }
 
@@ -159,6 +161,29 @@ static void remove_boid_from_division(t_cycle_division *div, int boid_idx) {
   }
 }
 
+static void activate_division_boids(t_boids3 *x, t_cycle_division *div)
+{
+  t_boid *boids = x->boids;
+  int *indices = div->boid_indices;
+  int count = div->num_boids;
+
+  for (int i = 0; i < count; i++) {
+    boids[indices[i]].active = 1;
+  }
+}
+
+static void deactivate_division_boids(t_boids3 *x, t_cycle_division *div)
+{
+  t_boid *boids = x->boids;
+  int *indices = div->boid_indices;
+  int count = div->num_boids;
+
+  for (int i = 0; i < count; i++) {
+    boids[indices[i]].active = 0;
+  }
+}
+
+
 static t_int *boids3_perform(t_int *w)
 {
   t_boids3 *x = (t_boids3 *)(w[1]);
@@ -174,23 +199,21 @@ static t_int *boids3_perform(t_int *w)
 
   t_float prev_cycle_pos = x->x_cycle_pos_ms;
   t_float new_cycle_pos = prev_cycle_pos + x->x_ms_per_block;
-  // rounding errors are fixed once per cycle; this may be good enough
-  if (new_cycle_pos >= x->x_cycle_ms) new_cycle_pos = 0.0f;
-  x->x_cycle_pos_ms = new_cycle_pos;
-  t_float next_cycle_pos = new_cycle_pos + x->x_ms_per_block;
-  int active_count = 0;
 
-  for (int i = 0; i < x->x_num_boids; i++) {
-    t_boid *boid = &x->boids[i];
-    if (!boid->active &&
-        boid->cycle_start_pos > prev_cycle_pos &&
-        boid->cycle_start_pos < next_cycle_pos) {
-      boid->active = 1;
+  if (new_cycle_pos >= x->x_cycle_ms) {
+    x->x_cycle_pos_ms = (t_float)0.0;
+    t_cycle_division *div = &x->cycle_divisions[0];
+    activate_division_boids(x, div);
+  } else {
+    x->x_cycle_pos_ms = new_cycle_pos;
+    t_float next_cycle_pos = new_cycle_pos + x->x_ms_per_block;
+    for (int i = 0; i < x->x_num_cycle_divisions; i++) {
+      t_cycle_division *div = &x->cycle_divisions[i];
+      if (div->start_pos_ms > prev_cycle_pos && div->start_pos_ms < next_cycle_pos) {
+        activate_division_boids(x, div);
+      }
     }
-    if (boid->active) active_count++;
   }
-
-  t_float window_amp_scale = (t_float)((t_float)1.0 / (t_float)active_count); // tmp solution
 
   if (!tab) return (w+5);
 
@@ -218,7 +241,7 @@ static t_int *boids3_perform(t_int *w)
         gphase += boid->window_phase_inc;
 
         // todo: add boid amplitude attribute
-        output += (f1 + frac * (f2 - f1)) * gsample * window_amp_scale;
+        output += (f1 + frac * (f2 - f1)) * gsample;
 
         while (wphase >= WAVETABLE_SIZE) wphase -= WAVETABLE_SIZE;
         boid->wavetable_phase = wphase;
@@ -226,8 +249,12 @@ static t_int *boids3_perform(t_int *w)
         while (gphase >= WINDOWTABLE_SIZE) gphase -= WINDOWTABLE_SIZE;
         boid->window_phase = gphase;
 
-        if (boid->window_phase >= WINDOWTABLE_SIZE - boid->window_phase_inc) {
+        // deactivating boids is happening at sample rate (for reasons)
+        // activating boids is happening at control rate
+        // this _might_ be ok, but...
+        if (boid->window_phase >= boid->window_deactivation_threshold) {
           boid->active = 0;
+          boid->window_phase = (t_float)0.0;
         }
       }
     }
@@ -238,12 +265,16 @@ static t_int *boids3_perform(t_int *w)
   return (w+5);
 }
 
+// called once when dsp is enabled on Pure Data
 static void boids3_dsp(t_boids3 *x, t_signal **sp)
 {
   // conversion factor for sample rate
   x->x_conv = (t_float)WAVETABLE_SIZE / sp[0]->s_sr;
   x->x_sr = (t_float)sp[0]->s_sr;
+  // ms per sample * Pd sample block size
   x->x_ms_per_block = ((t_float)1000.0 / x->x_sr) * sp[0]->s_length;
+  // use system sample rate to set boid window_phase_inc and
+  // window_deactivation_threshold to correct values
   update_boid_parameters(x);
   dsp_add(boids3_perform, 4, x, sp[0]->s_vec, sp[1]->s_vec, sp[0]->s_length);
 }
@@ -259,10 +290,11 @@ static void boids_init(t_boids3 *x)
   for (int i = 0; i < x->x_num_boids; i++) {
     t_boid *boid = &x->boids[i];
     boid->ratio = (t_float)0.5 + (t_float)1.5 * ((t_float)rand() / RAND_MAX);
-    boid->window_duration_ms = (t_float)100.0; // hardcoded for now
+    boid->window_duration_ms = (t_float)900.0; // hardcoded for now
     boid->window_phase = (double)0.0;
     boid->wavetable_phase = (double)0.0;
     boid->window_phase_inc = (t_float)0.0;
+    boid->window_deactivation_threshold = (t_float)0.0;
   }
 
   for (int i = 0; i < x->x_num_boids; i++) {
@@ -309,12 +341,11 @@ static void *boids3_new(t_floatarg root_freq, t_floatarg num_boids)
   x->x_num_boids = num_boids > 0 ? (int)num_boids : 4;
   x->x_sr = (t_float)0.0;
 
-  x->x_cycle_ms = 8000;
-  x->x_cycle_pos = (t_float)0.0;
+  x->x_cycle_ms = 4000;
   x->x_ms_per_block = (t_float)0.0;
 
   // tmp
-  x->x_num_cycle_divisions = 12;
+  x->x_num_cycle_divisions = 4;
 
   // initialize all pointers to NULL so that partial initialization failures can
   // be handled by the free function
