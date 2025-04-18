@@ -28,11 +28,14 @@ typedef struct _cycle_division {
   // pointer to start of array of boid indices that are currently associated with the division
   int *boid_indices;
   int num_boids; // number of boids associated with the division
+  t_float amp_scale;
 } t_cycle_division;
 
 typedef struct _boid {
   // sets the ratio of the boid's frequency to the master (root) frequency
   t_float ratio;
+  // NOTE: messing around:
+  t_cycle_division *div;
   double wavetable_phase; // boid's current position in the wave table
   t_float window_duration_ms; // ms of the boid's (Hann) window
   // how much to increment the phase for each DSP step
@@ -142,6 +145,7 @@ static void windowtable_free(void)
 static void add_boid_to_division(t_cycle_division *div, int boid_idx) {
   div->boid_indices[div->num_boids] = boid_idx;
   div->num_boids++;
+  div->amp_scale++;
 }
 
 static void remove_boid_from_division(t_cycle_division *div, int boid_idx) {
@@ -156,6 +160,7 @@ static void remove_boid_from_division(t_cycle_division *div, int boid_idx) {
         div->boid_indices[i] = div->boid_indices[div->num_boids - 1];
       }
       div->num_boids--;
+      if (div->amp_scale > 1) div->amp_scale--;
       return;
     }
   }
@@ -183,7 +188,6 @@ static void deactivate_division_boids(t_boids3 *x, t_cycle_division *div)
   }
 }
 
-
 static t_int *boids3_perform(t_int *w)
 {
   t_boids3 *x = (t_boids3 *)(w[1]);
@@ -199,6 +203,7 @@ static t_int *boids3_perform(t_int *w)
 
   t_float prev_cycle_pos = x->x_cycle_pos_ms;
   t_float new_cycle_pos = prev_cycle_pos + x->x_ms_per_block;
+
 
   if (new_cycle_pos >= x->x_cycle_ms) {
     x->x_cycle_pos_ms = (t_float)0.0;
@@ -239,9 +244,9 @@ static t_int *boids3_perform(t_int *w)
         t_sample g2 = gtable[gidx + 1];
         t_sample gsample = g1 + gfrac * (g2 - g1);
         gphase += boid->window_phase_inc;
+        t_sample scale = (t_sample)1.0 / (t_sample)(boid->div->amp_scale);
 
-        // todo: add boid amplitude attribute
-        output += (f1 + frac * (f2 - f1)) * gsample;
+        output += (f1 + frac * (f2 - f1)) * gsample * scale;
 
         while (wphase >= WAVETABLE_SIZE) wphase -= WAVETABLE_SIZE;
         boid->wavetable_phase = wphase;
@@ -249,9 +254,10 @@ static t_int *boids3_perform(t_int *w)
         while (gphase >= WINDOWTABLE_SIZE) gphase -= WINDOWTABLE_SIZE;
         boid->window_phase = gphase;
 
-        // deactivating boids is happening at sample rate (for reasons)
+        // deactivating boids is happening at sample rate
         // activating boids is happening at control rate
-        // this _might_ be ok, but...
+        // this allows for boids to extend past the duration of a single cycle
+        // division (not currently being done though)
         if (boid->window_phase >= boid->window_deactivation_threshold) {
           boid->active = 0;
           boid->window_phase = (t_float)0.0;
@@ -290,20 +296,24 @@ static void boids_init(t_boids3 *x)
   for (int i = 0; i < x->x_num_boids; i++) {
     t_boid *boid = &x->boids[i];
     boid->ratio = (t_float)0.5 + (t_float)1.5 * ((t_float)rand() / RAND_MAX);
-    boid->window_duration_ms = (t_float)900.0; // hardcoded for now
+    boid->window_duration_ms = (t_float)50.0; // hardcoded for now
     boid->window_phase = (double)0.0;
     boid->wavetable_phase = (double)0.0;
     boid->window_phase_inc = (t_float)0.0;
     boid->window_deactivation_threshold = (t_float)0.0;
+    boid->div = NULL; // maybe safer?
   }
 
   for (int i = 0; i < x->x_num_boids; i++) {
+    t_boid *boid = &x->boids[i];
     int division_idx = rand() % x->x_num_cycle_divisions;
     t_cycle_division *div = &x->cycle_divisions[division_idx];
     // add the boid's index to the indices array at position num_boids (next
     // available slot)
     div->boid_indices[div->num_boids] = i;
+    boid->div = div; // experiment (associate by pointer vs index)
     div->num_boids++;
+    div->amp_scale++;
   }
 }
 
@@ -329,6 +339,7 @@ static void cycle_divisions_init(t_boids3 *x)
       return;
     }
     div->num_boids = 0;
+    div->amp_scale = (t_float)1.0;
     div->start_pos_ms = division_ms * (t_float)i;
   }
 }
@@ -394,6 +405,12 @@ static void boids3_free(t_boids3 *x)
   }
 
   if (x->boids != NULL) {
+    for (int i = 0; i < x->x_num_boids; i++) {
+      if (x->boids[i].div != NULL) {
+        freebytes(x->boids[i].div, sizeof(t_cycle_division));
+        x->boids[i].div = NULL;
+      }
+    }
     freebytes(x->boids, sizeof(t_boid) * x->x_num_boids);
     x->boids = NULL;
   }
