@@ -180,7 +180,7 @@ static void boids_init(t_boids4 *x)
   for (int i = 0; i < x->x_num_boids; i++) {
     t_boid *boid = &x->boids[i];
     boid->ratio = (t_float)0.5 + (t_float)1.5 * ((t_float)rand() / RAND_MAX);
-    boid->window_duration_ms = (t_float)1000.0;
+    boid->window_duration_ms = (t_float)120.0;
     boid->window_phase = (double)0.0;
     boid->window_phase_inc = (double)0.0;
     boid->wavetable_phase = (double)0.0;
@@ -234,46 +234,28 @@ static t_int *boids4_perform(t_int *w)
 
   int current_phase = x->x_cycle_phase;
   int next_phase = current_phase + n;
+  if (next_phase >= x->x_cycle_samples) next_phase -= x->x_cycle_samples;
+
   int current_division_index = x->x_current_division_index;
   int next_division_index = current_division_index + 1;
   if (next_division_index >= x->x_num_cycle_divisions) next_division_index = 0;
-  post("next division index: %d", next_division_index);
 
-  // missing some logic here, but so close
-  int cycle_wrapped = 0; // maybe?
-  if (next_phase >= x->x_cycle_samples) {
-    // next_phase -= x->x_cycle_samples;
-    next_phase = 0;
-    cycle_wrapped = 1;
-  }
+  int current_division_end = x->cycle_divisions[current_division_index].end_sample;
 
-  if (next_phase == 0) {
-    x->x_current_division_index = 0;
+  if ((current_phase == 0) && (current_division_index == 0)) {
     activate_division_boids(x, &x->cycle_divisions[0]);
+    post("in special case!");
   } else {
-    // int next_division_index = (current_division_index + 1) % x->x_num_cycle_divisions;
-    int next_division_start = x->cycle_divisions[next_division_index].start_sample;
-    if ((next_division_start - next_phase < n) || (x->x_cycle_samples - next_phase < n)) {
+    if (current_division_end - current_phase < n) {
       x->x_current_division_index = next_division_index;
       activate_division_boids(x, &x->cycle_divisions[next_division_index]);
-      next_phase = next_division_start;
     }
-
   }
-  post("current div index: %d", x->x_current_division_index);
 
-  // if (cycle_wrapped) {
-  //   activate_division_boids(x, &x->cycle_divisions[0]);
-  //   x->x_current_division_index = 0;
-  // } else {
-  //   int next_division_index = (x->x_current_division_index < (x->x_num_cycle_divisions - 1)) ?
-  //     x->x_current_division_index + 1 : 0;
-  //   int next_division_start = x->cycle_divisions[next_division_index].start_sample;
-  //   if ((next_division_start - next_phase) < n) {
-  //     x->x_current_division_index = next_division_index;
-  //     activate_division_boids(x, &x->cycle_divisions[next_division_index]);
-  //   }
-  // }
+  // get a pointer to the current cycle_division
+  t_cycle_division *div = &x->cycle_divisions[x->x_current_division_index];
+  int num_boids = div->num_boids;
+  t_float amp_scale = (num_boids > 1) ? (t_float)1.0 / (t_float)num_boids : (t_float)1.0;
 
   while (n--) {
     t_sample f = *in1++;
@@ -298,7 +280,7 @@ static t_int *boids4_perform(t_int *w)
         t_sample g_sample = g1 + g_frac * (g2 - g1);
         g_phase += boid->window_phase_inc;
 
-        output += (f1 + w_frac * (f2 - f1)) * g_sample;
+        output += (f1 + w_frac * (f2 - f1)) * g_sample * amp_scale;
 
         while (w_phase >= WAVETABLE_SIZE) w_phase -= WAVETABLE_SIZE;
         boid->wavetable_phase = w_phase;
@@ -375,11 +357,11 @@ static void *boids4_new(t_floatarg root_freq, t_floatarg num_boids)
   x->x_num_boids = num_boids > 0 ? (int)num_boids : 4;
   x->x_sr = (t_float)0.0;
 
-  x->x_cycle_ms = 4008;
+  x->x_cycle_ms = 4000;
   x->x_cycle_samples = 0;
 
   // tmp
-  x->x_num_cycle_divisions = 4;
+  x->x_num_cycle_divisions = 32;
 
   x->boids = NULL;
   x->cycle_divisions = NULL;
