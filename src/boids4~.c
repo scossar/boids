@@ -36,6 +36,8 @@ typedef struct _boid {
   t_float window_duration_ms;
   double window_phase_inc;
   double window_phase;
+  t_float window_deactivation_threshold;
+  
   t_cycle_division *current_division;
   int active;
 } t_boid;
@@ -50,6 +52,7 @@ typedef struct _boids4 {
 
   int x_cycle_ms; // for user input; will be converted to samples internally
   int x_cycle_samples; // total samples in cycle
+  int x_cycle_phase; // current sample in cycle
 
   int x_num_cycle_divisions;
   t_cycle_division *cycle_divisions;
@@ -126,18 +129,94 @@ static void windowtable_free(void)
   }
 }
 
-static void boids_free(t_boids4 *x)
+static void cycle_divisions_init(t_boids4 *x)
 {
-  if (x->x_frequency_inlet) {
-    inlet_free(x->x_frequency_inlet);
+  x->cycle_divisions = (t_cycle_division *)getbytes(sizeof(t_cycle_division) *
+                                                    x->x_num_cycle_divisions);
+  if (x->cycle_divisions == NULL) {
+    pd_error(x, "boids4~: failed to allocate memory for cycle divisions");
+    return;
   }
 
-  if (x->x_outlet) {
-    outlet_free(x->x_outlet);
+  for (int i = 0; i < x->x_num_cycle_divisions; i++) {
+    x->cycle_divisions[i].boid_indices = (int *)getbytes(sizeof(int) * x->x_num_boids);
+    if (x->cycle_divisions[i].boid_indices == NULL) {
+      pd_error(x, "boids4~: failed to allocate memory for cycle_division[%d].boid_indeces", i);
+      return;
+    }
+  }
+}
+
+// called from DSP method
+static void cycle_division_update(t_boids4 *x) {
+  // the values are ints, but just in case:
+  int samples_per_division = (int)x->x_cycle_samples / (int)x->x_num_cycle_divisions;
+  int remainder = (int)x->x_cycle_samples % (int)x->x_num_cycle_divisions;
+
+  int current_start = 0;
+  for (int i = 0; i < x->x_num_cycle_divisions; i++) {
+    x->cycle_divisions[i].start_sample = current_start;
+
+    // deal with possible remainder (largest possible remainder is num_divisions
+    // - 1)
+    int this_division_samples = samples_per_division;
+    if (i < remainder) {
+      this_division_samples++;
+    }
+    current_start += this_division_samples;
+    // (last division's end sample will be x_cycle_samples - 1)
+    x->cycle_divisions[i].end_sample = current_start - 1;
+  }
+}
+
+static void boids_init(t_boids4 *x)
+{
+  x->boids = (t_boid *)getbytes(sizeof(t_boid) * x->x_num_boids);
+  if (x->boids == NULL) {
+    pd_error(x, "boids4~: failed to allocate memory for boids");
+    return;
   }
 
-  wavetable_free();
-  windowtable_free();
+  for (int i = 0; i < x->x_num_boids; i++) {
+    t_boid *boid = &x->boids[i];
+    boid->ratio = (t_float)0.5 + (t_float)1.5 * ((t_float)rand() / RAND_MAX);
+    boid->window_duration_ms = (t_float)1000.0;
+    boid->window_phase = (double)0.0;
+    boid->window_phase_inc = (double)0.0;
+    boid->wavetable_phase = (double)0.0;
+    boid->active = 0;
+
+    int division_idx = rand() % x->x_num_cycle_divisions;
+    t_cycle_division *div = &x->cycle_divisions[division_idx];
+
+    // add boid idx to division
+    div->boid_indices[div->num_boids] = i;
+    div->num_boids++;
+
+    // set bidirectional reference
+    boid->current_division = div;
+  }
+}
+
+static void boids_update(t_boids4 *x)
+{
+  for (int i = 0; i < x->x_num_boids; i++) {
+    t_boid *boid = &x->boids[i];
+    t_float window_samples = boid->window_duration_ms * x->x_sr * (t_float)0.001;
+    boid->window_phase_inc = (t_float)((t_float)WINDOWTABLE_SIZE / window_samples);
+    boid->window_deactivation_threshold = (t_float)WINDOWTABLE_SIZE - boid->window_phase_inc;
+  }
+}
+
+static void activate_division_boids(t_boids4 *x, t_cycle_division *div)
+{
+  t_boid *boids = x->boids;
+  int *indices = div->boid_indices;
+  int count = div->num_boids;
+
+  for (int i = 0; i < count; i++) {
+    boids[indices[i]].active = 1;
+  }
 }
 
 static t_int *boids4_perform(t_int *w)
@@ -149,15 +228,95 @@ static t_int *boids4_perform(t_int *w)
 
   t_float *wave_tab = cos_table;
   t_float *window_tab = window_table;
+  int wave_mask = WAVETABLE_SIZE - 1;
+  int window_mask = WINDOWTABLE_SIZE - 1;
   t_float conv = x->x_conv;
+
+  int current_phase = x->x_cycle_phase;
+  int next_phase = current_phase + n;
+  int current_division_index = x->x_current_division_index;
+  int next_division_index = current_division_index + 1;
+  if (next_division_index >= x->x_num_cycle_divisions) next_division_index = 0;
+  post("next division index: %d", next_division_index);
+
+  // missing some logic here, but so close
+  int cycle_wrapped = 0; // maybe?
+  if (next_phase >= x->x_cycle_samples) {
+    // next_phase -= x->x_cycle_samples;
+    next_phase = 0;
+    cycle_wrapped = 1;
+  }
+
+  if (next_phase == 0) {
+    x->x_current_division_index = 0;
+    activate_division_boids(x, &x->cycle_divisions[0]);
+  } else {
+    // int next_division_index = (current_division_index + 1) % x->x_num_cycle_divisions;
+    int next_division_start = x->cycle_divisions[next_division_index].start_sample;
+    if ((next_division_start - next_phase < n) || (x->x_cycle_samples - next_phase < n)) {
+      x->x_current_division_index = next_division_index;
+      activate_division_boids(x, &x->cycle_divisions[next_division_index]);
+      next_phase = next_division_start;
+    }
+
+  }
+  post("current div index: %d", x->x_current_division_index);
+
+  // if (cycle_wrapped) {
+  //   activate_division_boids(x, &x->cycle_divisions[0]);
+  //   x->x_current_division_index = 0;
+  // } else {
+  //   int next_division_index = (x->x_current_division_index < (x->x_num_cycle_divisions - 1)) ?
+  //     x->x_current_division_index + 1 : 0;
+  //   int next_division_start = x->cycle_divisions[next_division_index].start_sample;
+  //   if ((next_division_start - next_phase) < n) {
+  //     x->x_current_division_index = next_division_index;
+  //     activate_division_boids(x, &x->cycle_divisions[next_division_index]);
+  //   }
+  // }
 
   while (n--) {
     t_sample f = *in1++;
     t_sample output = (t_sample)0.0;
 
+    for (int i = 0; i < x->x_num_boids; i++) {
+      t_boid *boid = &x->boids[i];
+
+      if (boid->active) {
+        double w_phase = boid->wavetable_phase;
+        unsigned int w_idx = (unsigned int)w_phase & wave_mask;
+        t_sample w_frac = (t_sample)(w_phase - (t_sample)w_idx);
+        t_sample f1 = wave_tab[w_idx];
+        t_sample f2 = wave_tab[w_idx + 1];
+        w_phase += boid->ratio * f * conv;
+
+        double g_phase = boid->window_phase;
+        unsigned int g_idx = (unsigned int)g_phase & window_mask;
+        t_sample g_frac = (t_sample)(g_phase - (t_sample)g_idx);
+        t_sample g1 = window_tab[g_idx];
+        t_sample g2 = window_tab[g_idx + 1];
+        t_sample g_sample = g1 + g_frac * (g2 - g1);
+        g_phase += boid->window_phase_inc;
+
+        output += (f1 + w_frac * (f2 - f1)) * g_sample;
+
+        while (w_phase >= WAVETABLE_SIZE) w_phase -= WAVETABLE_SIZE;
+        boid->wavetable_phase = w_phase;
+
+        while (g_phase >= WINDOWTABLE_SIZE) g_phase -= WINDOWTABLE_SIZE;
+        boid->window_phase = g_phase;
+
+        if (boid->window_phase >= boid->window_deactivation_threshold) {
+          boid->active = 0;
+          boid->window_phase = (t_float)0.0;
+        }
+      }
+    }
+
     *out1++ = output;
   }
 
+  x->x_cycle_phase = next_phase;
   return (w+5);
 }
 
@@ -166,8 +325,46 @@ static void boids4_dsp(t_boids4 *x, t_signal **sp)
   x->x_sr = sp[0]->s_sr;
   x->x_conv = (t_float)WAVETABLE_SIZE / x->x_sr;
   x->x_cycle_samples = (int)(x->x_cycle_ms * x->x_sr * 0.001f);
-
+  cycle_division_update(x);
+  boids_update(x);
   dsp_add(boids4_perform, 4, x, sp[0]->s_vec, sp[1]->s_vec, sp[0]->s_length);
+}
+
+static void boids_free(t_boids4 *x)
+{
+  if (x->x_frequency_inlet != NULL) {
+    inlet_free(x->x_frequency_inlet);
+  }
+
+  if (x->x_outlet != NULL) {
+    outlet_free(x->x_outlet);
+  }
+
+  if (x->cycle_divisions != NULL) {
+    for (int i = 0; i < x->x_num_cycle_divisions; i++) {
+      freebytes(x->cycle_divisions[i].boid_indices, sizeof(int) * x->x_num_boids);
+      x->cycle_divisions[i].boid_indices = NULL;
+    }
+
+    freebytes(x->cycle_divisions, sizeof(t_cycle_division) * x->x_num_cycle_divisions);
+    x->cycle_divisions = NULL;
+  }
+
+  if (x->boids != NULL) {
+    for (int i = 0; i < x->x_num_boids; i++) {
+      if (x->boids[i].current_division != NULL) {
+        // the memory has already been freed (it's owned by cycle_divisions)
+        // just set to NULL to be safe
+        x->boids[i].current_division = NULL;
+      }
+    }
+
+    freebytes(x->boids, sizeof(t_boid) * x->x_num_boids);
+    x->boids = NULL;
+  }
+
+  wavetable_free();
+  windowtable_free();
 }
 
 static void *boids4_new(t_floatarg root_freq, t_floatarg num_boids)
@@ -178,7 +375,7 @@ static void *boids4_new(t_floatarg root_freq, t_floatarg num_boids)
   x->x_num_boids = num_boids > 0 ? (int)num_boids : 4;
   x->x_sr = (t_float)0.0;
 
-  x->x_cycle_ms = 4000;
+  x->x_cycle_ms = 4008;
   x->x_cycle_samples = 0;
 
   // tmp
@@ -188,6 +385,8 @@ static void *boids4_new(t_floatarg root_freq, t_floatarg num_boids)
   x->cycle_divisions = NULL;
   x->x_conv = (t_float)0.0;
   x->x_sr = (t_float)0.0;
+  x->x_current_division_index = 0;
+  x->x_cycle_phase = 0;
 
   x->x_frequency_inlet = inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_signal, &s_signal);
   pd_float((t_pd *)x->x_frequency_inlet, x->x_f);
@@ -195,6 +394,8 @@ static void *boids4_new(t_floatarg root_freq, t_floatarg num_boids)
 
   wavetable_init();
   windowtable_init();
+  cycle_divisions_init(x);
+  boids_init(x);
 
   static int seed_initialized = 0;
   if (!seed_initialized) {
@@ -213,4 +414,7 @@ void boids4_tilde_setup(void)
                            sizeof(t_boids4),
                            CLASS_DEFAULT,
                            A_DEFFLOAT, A_DEFFLOAT, 0);
+
+  class_addmethod(boids4_class, (t_method)boids4_dsp, gensym("dsp"), A_CANT, 0);
+  CLASS_MAINSIGNALIN(boids4_class, t_boids4, x_f);
 }
