@@ -28,6 +28,7 @@ typedef struct _cycle_division {
   int end_sample;
   int num_boids;
   int *boid_indices;
+  struct _cycle_division *next_division;
 } t_cycle_division;
 
 typedef struct _boid {
@@ -144,6 +145,9 @@ static void cycle_divisions_init(t_boids4 *x)
       pd_error(x, "boids4~: failed to allocate memory for cycle_division[%d].boid_indeces", i);
       return;
     }
+
+    int next_idx = (i + 1) % x->x_num_cycle_divisions;
+    x->cycle_divisions[i].next_division = &x->cycle_divisions[next_idx];
   }
 }
 
@@ -180,7 +184,7 @@ static void boids_init(t_boids4 *x)
   for (int i = 0; i < x->x_num_boids; i++) {
     t_boid *boid = &x->boids[i];
     boid->ratio = (t_float)0.5 + (t_float)4.5 * ((t_float)rand() / RAND_MAX);
-    boid->window_duration_ms = (t_float)500.0;
+    boid->window_duration_ms = (t_float)220.0;
     boid->window_phase = (double)0.0;
     boid->window_phase_inc = (double)0.0;
     boid->wavetable_phase = (double)0.0;
@@ -219,6 +223,55 @@ static void activate_division_boids(t_boids4 *x, t_cycle_division *div)
   }
 }
 
+static void move_boid_to_division(t_boids4 *x, int boid_idx, t_cycle_division *new_div)
+{
+  t_boid *boid = &x->boids[boid_idx];
+  t_cycle_division *old_div = boid->current_division;
+  // t_cycle_division *new_div = &x->cycle_divisions[new_div_idx];
+
+  int found = 0;
+  for (int i = 0; i < old_div->num_boids; i++) {
+    if (found) {
+      old_div->boid_indices[i-1] = old_div->boid_indices[i]; 
+    } else if (old_div->boid_indices[i] == boid_idx) {
+      found = 1;
+    }
+  }
+
+  if (found) {
+    old_div->num_boids--;
+    new_div->boid_indices[new_div->num_boids] = boid_idx;
+    new_div->num_boids++;
+
+    boid->current_division = new_div;
+    boid->active = 0; // on the assumption this is called before playing current
+    // div
+  }
+}
+
+// note: the move function can be changed to accept two division pointers (old
+// and new)
+static void apply_boid_threshold_rule(t_boids4 *x, t_cycle_division *div, int threshold)
+{
+  if (div->num_boids > threshold) {
+    int random_idx = rand() % div->num_boids;
+    int boid_idx = div->boid_indices[random_idx];
+    move_boid_to_division(x, boid_idx, div->next_division);
+  }
+}
+
+static void apply_div_harmonizing_rule(t_boids4 *x, t_cycle_division *div)
+{
+  for (int i = 0; i < div->num_boids; i++) {
+    t_boid *boid = &x->boids[div->boid_indices[i]]; 
+    t_float ratio = boid->ratio;
+    t_float frac = ratio - (int)ratio;
+    t_float scale = frac * (t_float)0.01;
+    scale = (frac > (t_float)0.5) ? scale : -scale;
+    boid->ratio += scale;
+  }
+}
+
 static t_int *boids4_perform(t_int *w)
 {
   t_boids4 *x = (t_boids4 *)(w[1]);
@@ -234,7 +287,8 @@ static t_int *boids4_perform(t_int *w)
 
   int current_phase = x->x_cycle_phase;
   int next_phase = current_phase + n;
-  if (next_phase >= x->x_cycle_samples) next_phase -= x->x_cycle_samples;
+  // if (next_phase >= x->x_cycle_samples) next_phase -= x->x_cycle_samples;
+  if (next_phase >= x->x_cycle_samples) next_phase = 0;
 
   int current_division_index = x->x_current_division_index;
   t_cycle_division *current_division = &x->cycle_divisions[current_division_index];
@@ -245,8 +299,12 @@ static t_int *boids4_perform(t_int *w)
     if (next_division_index >= x->x_num_cycle_divisions) next_division_index = 0;
     x->x_current_division_index = next_division_index;
     activate_division_boids(x, &x->cycle_divisions[next_division_index]);
+    apply_boid_threshold_rule(x, &x->cycle_divisions[next_division_index], 1);
+    apply_div_harmonizing_rule(x, &x->cycle_divisions[next_division_index]);
   } else if (current_phase == 0 && current_division_index == 0) {
     activate_division_boids(x, &x->cycle_divisions[0]);
+    apply_boid_threshold_rule(x, &x->cycle_divisions[0], 1);
+    apply_div_harmonizing_rule(x, &x->cycle_divisions[0]);
   }
 
   // get a pointer to the current cycle_division
@@ -354,7 +412,7 @@ static void *boids4_new(t_floatarg root_freq, t_floatarg num_boids)
   x->x_num_boids = num_boids > 0 ? (int)num_boids : 4;
   x->x_sr = (t_float)0.0;
 
-  x->x_cycle_ms = 8000;
+  x->x_cycle_ms = 2000;
   x->x_cycle_samples = 0;
 
   // tmp
