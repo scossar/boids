@@ -179,8 +179,8 @@ static void boids_init(t_boids4 *x)
 
   for (int i = 0; i < x->x_num_boids; i++) {
     t_boid *boid = &x->boids[i];
-    boid->ratio = (t_float)0.5 + (t_float)1.5 * ((t_float)rand() / RAND_MAX);
-    boid->window_duration_ms = (t_float)120.0;
+    boid->ratio = (t_float)0.5 + (t_float)4.5 * ((t_float)rand() / RAND_MAX);
+    boid->window_duration_ms = (t_float)500.0;
     boid->window_phase = (double)0.0;
     boid->window_phase_inc = (double)0.0;
     boid->wavetable_phase = (double)0.0;
@@ -237,19 +237,16 @@ static t_int *boids4_perform(t_int *w)
   if (next_phase >= x->x_cycle_samples) next_phase -= x->x_cycle_samples;
 
   int current_division_index = x->x_current_division_index;
-  int next_division_index = current_division_index + 1;
-  if (next_division_index >= x->x_num_cycle_divisions) next_division_index = 0;
+  t_cycle_division *current_division = &x->cycle_divisions[current_division_index];
+  int current_division_end = current_division->end_sample;
 
-  int current_division_end = x->cycle_divisions[current_division_index].end_sample;
-
-  if ((current_phase == 0) && (current_division_index == 0)) {
+  if (current_division_end - current_phase < n) {
+    int next_division_index = current_division_index + 1;
+    if (next_division_index >= x->x_num_cycle_divisions) next_division_index = 0;
+    x->x_current_division_index = next_division_index;
+    activate_division_boids(x, &x->cycle_divisions[next_division_index]);
+  } else if (current_phase == 0 && current_division_index == 0) {
     activate_division_boids(x, &x->cycle_divisions[0]);
-    post("in special case!");
-  } else {
-    if (current_division_end - current_phase < n) {
-      x->x_current_division_index = next_division_index;
-      activate_division_boids(x, &x->cycle_divisions[next_division_index]);
-    }
   }
 
   // get a pointer to the current cycle_division
@@ -357,11 +354,11 @@ static void *boids4_new(t_floatarg root_freq, t_floatarg num_boids)
   x->x_num_boids = num_boids > 0 ? (int)num_boids : 4;
   x->x_sr = (t_float)0.0;
 
-  x->x_cycle_ms = 4000;
+  x->x_cycle_ms = 8000;
   x->x_cycle_samples = 0;
 
   // tmp
-  x->x_num_cycle_divisions = 32;
+  x->x_num_cycle_divisions = 16;
 
   x->boids = NULL;
   x->cycle_divisions = NULL;
