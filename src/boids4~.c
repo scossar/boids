@@ -11,6 +11,8 @@
 * - typecasting_in_c.md  
 * - initializing_boids_and_cycle_divisions.md
 * - refactoring_boids_external.md
+* - boid_harmonizing_rules.md
+* - bang_messages_from_pure_data_audio_external.md
 *
 */
 
@@ -183,8 +185,9 @@ static void boids_init(t_boids4 *x)
 
   for (int i = 0; i < x->x_num_boids; i++) {
     t_boid *boid = &x->boids[i];
-    boid->ratio = (t_float)0.5 + (t_float)4.5 * ((t_float)rand() / RAND_MAX);
-    boid->window_duration_ms = (t_float)220.0;
+    // boid->ratio = (t_float)0.5 + (t_float)4.5 * ((t_float)rand() / RAND_MAX);
+    boid->ratio = (t_float)(1 + (i % 10));
+    boid->window_duration_ms = (t_float)120.0;
     boid->window_phase = (double)0.0;
     boid->window_phase_inc = (double)0.0;
     boid->wavetable_phase = (double)0.0;
@@ -272,6 +275,21 @@ static void apply_div_harmonizing_rule(t_boids4 *x, t_cycle_division *div)
   }
 }
 
+// works well when boids are initialized to values on the harmonic series
+static void apply_div_odd_even_rule(t_boids4 *x, t_cycle_division *div)
+{
+  int sum = 0;
+  for (int i = 0; i < div->num_boids; i++) {
+    t_boid *boid = &x->boids[div->boid_indices[i]]; 
+    t_float ratio = boid->ratio;
+    sum += (int)ratio;
+    if (!(sum & 1)) { // check odd/even of sum ((sum & 1) is odd)
+      ratio = (ratio < (t_float)2.0) ? ratio : ratio - 1;
+    }
+    boid->ratio = ratio;
+  }
+}
+
 static t_int *boids4_perform(t_int *w)
 {
   t_boids4 *x = (t_boids4 *)(w[1]);
@@ -287,6 +305,8 @@ static t_int *boids4_perform(t_int *w)
 
   int current_phase = x->x_cycle_phase;
   int next_phase = current_phase + n;
+  // note either the commented out line below, or approach of setting next_phase
+  // to 0 when it wraps produces close to the same result
   // if (next_phase >= x->x_cycle_samples) next_phase -= x->x_cycle_samples;
   if (next_phase >= x->x_cycle_samples) next_phase = 0;
 
@@ -294,17 +314,20 @@ static t_int *boids4_perform(t_int *w)
   t_cycle_division *current_division = &x->cycle_divisions[current_division_index];
   int current_division_end = current_division->end_sample;
 
+  // check to see if we're at the ~beginning of a new cycle division
+  // note: there same pointer is being found multiple times in the code below;
+  // that will get fixed:
   if (current_division_end - current_phase < n) {
     int next_division_index = current_division_index + 1;
     if (next_division_index >= x->x_num_cycle_divisions) next_division_index = 0;
     x->x_current_division_index = next_division_index;
     activate_division_boids(x, &x->cycle_divisions[next_division_index]);
     apply_boid_threshold_rule(x, &x->cycle_divisions[next_division_index], 1);
-    apply_div_harmonizing_rule(x, &x->cycle_divisions[next_division_index]);
+    apply_div_odd_even_rule(x, &x->cycle_divisions[next_division_index]);
   } else if (current_phase == 0 && current_division_index == 0) {
     activate_division_boids(x, &x->cycle_divisions[0]);
     apply_boid_threshold_rule(x, &x->cycle_divisions[0], 1);
-    apply_div_harmonizing_rule(x, &x->cycle_divisions[0]);
+    apply_div_odd_even_rule(x, &x->cycle_divisions[0]);
   }
 
   // get a pointer to the current cycle_division
