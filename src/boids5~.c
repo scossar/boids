@@ -40,6 +40,11 @@ typedef struct _boid {
   double window_phase_inc;
   double window_phase;
   t_float window_deactivation_threshold;
+  int crossfading_out;
+  int crossfade_samples;
+  int crossfade_out_samples_remaining;
+  int crossfading_in;
+  int crossfade_in_samples_remaining;
   
   t_cycle_division *current_division;
   int active;
@@ -49,6 +54,7 @@ typedef struct _boids5 {
   t_object x_obj;
 
   t_float x_sr; // system sample rate
+  int x_pd_block_size;
 
   int x_num_boids;
   t_boid *boids;
@@ -187,11 +193,16 @@ static void boids_init(t_boids5 *x)
     t_boid *boid = &x->boids[i];
     // boid->ratio = (t_float)0.5 + (t_float)4.5 * ((t_float)rand() / RAND_MAX);
     boid->ratio = (t_float)(1 + (i % 10));
-    boid->window_duration_ms = (t_float)120.0;
+    boid->window_duration_ms = (t_float)125.0;
     boid->window_phase = (double)0.0;
     boid->window_phase_inc = (double)0.0;
     boid->wavetable_phase = (double)0.0;
     boid->active = 0;
+    boid->crossfade_samples = 0; // set in boids_update
+    boid->crossfading_out = 0;
+    boid->crossfade_out_samples_remaining = 0;
+    boid->crossfading_in = 0;
+    boid->crossfade_in_samples_remaining = 0;
 
     int division_idx = rand() % x->x_num_cycle_divisions;
     t_cycle_division *div = &x->cycle_divisions[division_idx];
@@ -212,6 +223,8 @@ static void boids_update(t_boids5 *x)
     t_float window_samples = boid->window_duration_ms * x->x_sr * (t_float)0.001;
     boid->window_phase_inc = (t_float)((t_float)WINDOWTABLE_SIZE / window_samples);
     boid->window_deactivation_threshold = (t_float)WINDOWTABLE_SIZE - boid->window_phase_inc;
+    boid->crossfade_samples = 12 * x->x_pd_block_size; // guessing a bit here,
+    // maybe shorter?
   }
 }
 
@@ -222,7 +235,26 @@ static void activate_division_boids(t_boids5 *x, t_cycle_division *div)
   int count = div->num_boids;
 
   for (int i = 0; i < count; i++) {
-    boids[indices[i]].active = 1;
+    t_boid *boid = &x->boids[indices[i]];
+    boid->active = 1;
+    boid->window_phase = (t_float)0.0;
+
+    boid->crossfading_in = 1;
+    boid->crossfade_in_samples_remaining = boid->crossfade_samples;
+  }
+}
+
+static void deactivate_division_boids(t_boids5 *x, t_cycle_division *div)
+{
+  t_boid *boids = x->boids;
+  int *indices = div->boid_indices;
+  int count = div->num_boids;
+
+  for (int i = 0; i < count; i++) {
+    t_boid *boid = &x->boids[indices[i]];
+    boid->active = 0;
+    boid->window_phase = (t_float)0.0;
+
   }
 }
 
@@ -290,6 +322,30 @@ static void apply_div_odd_even_rule(t_boids5 *x, t_cycle_division *div)
   }
 }
 
+static void move_division_forward(t_boids5 *x)
+{
+  int current_division_index = x->x_current_division_index;
+  int next_division_index = current_division_index + 1;
+  if (next_division_index >= x->x_num_cycle_divisions) next_division_index = 0;
+  x->x_current_division_index = next_division_index;
+
+  t_cycle_division *current_div = &x->cycle_divisions[current_division_index];
+
+  for (int i = 0; i < current_div->num_boids; i++) {
+    t_boid *boid = &x->boids[current_div->boid_indices[i]];
+    if (boid->active) {
+      boid->crossfading_out = 1;
+      boid->crossfade_out_samples_remaining = boid->crossfade_samples; // testing
+    }
+  }
+
+  t_cycle_division *next_div = &x->cycle_divisions[next_division_index];
+  // deactivate_division_boids(x, current_div);
+  activate_division_boids(x, next_div);
+  apply_boid_threshold_rule(x, next_div, 1);
+  apply_div_odd_even_rule(x, next_div);
+}
+
 static t_int *boids5_perform(t_int *w)
 {
   t_boids5 *x = (t_boids5 *)(w[1]);
@@ -303,33 +359,6 @@ static t_int *boids5_perform(t_int *w)
   int window_mask = WINDOWTABLE_SIZE - 1;
   t_float conv = x->x_conv;
 
-  int current_phase = x->x_cycle_phase;
-  int next_phase = current_phase + n;
-  // note either the commented out line below, or approach of setting next_phase
-  // to 0 when it wraps produces close to the same result
-  // if (next_phase >= x->x_cycle_samples) next_phase -= x->x_cycle_samples;
-  if (next_phase >= x->x_cycle_samples) next_phase = 0;
-
-  int current_division_index = x->x_current_division_index;
-  t_cycle_division *current_division = &x->cycle_divisions[current_division_index];
-  int current_division_end = current_division->end_sample;
-
-  // check to see if we're at the ~beginning of a new cycle division
-  // note: there same pointer is being found multiple times in the code below;
-  // that will get fixed:
-  if (current_division_end - current_phase < n) {
-    int next_division_index = current_division_index + 1;
-    if (next_division_index >= x->x_num_cycle_divisions) next_division_index = 0;
-    x->x_current_division_index = next_division_index;
-    activate_division_boids(x, &x->cycle_divisions[next_division_index]);
-    apply_boid_threshold_rule(x, &x->cycle_divisions[next_division_index], 1);
-    apply_div_odd_even_rule(x, &x->cycle_divisions[next_division_index]);
-  } else if (current_phase == 0 && current_division_index == 0) {
-    activate_division_boids(x, &x->cycle_divisions[0]);
-    apply_boid_threshold_rule(x, &x->cycle_divisions[0], 1);
-    apply_div_odd_even_rule(x, &x->cycle_divisions[0]);
-  }
-
   // get a pointer to the current cycle_division
   t_cycle_division *div = &x->cycle_divisions[x->x_current_division_index];
   int num_boids = div->num_boids;
@@ -341,6 +370,7 @@ static t_int *boids5_perform(t_int *w)
 
     for (int i = 0; i < x->x_num_boids; i++) {
       t_boid *boid = &x->boids[i];
+      t_float crossfade = (t_float)1.0;
 
       if (boid->active) {
         double w_phase = boid->wavetable_phase;
@@ -358,31 +388,47 @@ static t_int *boids5_perform(t_int *w)
         t_sample g_sample = g1 + g_frac * (g2 - g1);
         g_phase += boid->window_phase_inc;
 
-        output += (f1 + w_frac * (f2 - f1)) * g_sample * amp_scale;
+        if (boid->crossfading_out) {
+          crossfade = (t_float)boid->crossfade_out_samples_remaining / (t_float)boid->crossfade_samples;
+          boid->crossfade_out_samples_remaining--;
+
+          if (boid->crossfade_out_samples_remaining == 0) {
+            boid->active = 0;
+            boid->crossfading_out = 0;
+            continue; // skip processing boid
+          }
+        }
+
+        if (boid->crossfading_in) {
+          crossfade = (t_float)1.0 - ((t_float)boid->crossfade_in_samples_remaining /
+                                      (t_float)boid->crossfade_samples);
+          boid->crossfade_in_samples_remaining--;
+
+          if (boid->crossfade_in_samples_remaining == 0) {
+            boid->crossfading_in = 0;
+          }
+        }
+
+        output += (f1 + w_frac * (f2 - f1)) * g_sample * amp_scale * crossfade;
 
         while (w_phase >= WAVETABLE_SIZE) w_phase -= WAVETABLE_SIZE;
         boid->wavetable_phase = w_phase;
 
         while (g_phase >= WINDOWTABLE_SIZE) g_phase -= WINDOWTABLE_SIZE;
         boid->window_phase = g_phase;
-
-        if (boid->window_phase >= boid->window_deactivation_threshold) {
-          boid->active = 0;
-          boid->window_phase = (t_float)0.0;
-        }
       }
     }
 
     *out1++ = output;
   }
 
-  x->x_cycle_phase = next_phase;
   return (w+5);
 }
 
 static void boids5_dsp(t_boids5 *x, t_signal **sp)
 {
   x->x_sr = sp[0]->s_sr;
+  x->x_pd_block_size = sp[0]->s_length;
   x->x_conv = (t_float)WAVETABLE_SIZE / x->x_sr;
   x->x_cycle_samples = (int)(x->x_cycle_ms * x->x_sr * 0.001f);
   cycle_division_update(x);
@@ -445,6 +491,7 @@ static void *boids5_new(t_floatarg root_freq, t_floatarg num_boids)
   x->cycle_divisions = NULL;
   x->x_conv = (t_float)0.0;
   x->x_sr = (t_float)0.0;
+  x->x_pd_block_size = 0;
   x->x_current_division_index = 0;
   x->x_cycle_phase = 0;
 
@@ -476,5 +523,6 @@ void boids5_tilde_setup(void)
                            A_DEFFLOAT, A_DEFFLOAT, 0);
 
   class_addmethod(boids5_class, (t_method)boids5_dsp, gensym("dsp"), A_CANT, 0);
+  class_addbang(boids5_class, (t_method)move_division_forward);
   CLASS_MAINSIGNALIN(boids5_class, t_boids5, x_f);
 }
